@@ -2,15 +2,13 @@ import os
 import asyncio
 import threading
 import json
-from urllib.request import urlopen
+import time
+from urllib.request import urlopen, Request
+from urllib.parse import urlencode
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 # ==========================================
@@ -21,6 +19,24 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN পাওয়া যায়নি!")
+
+
+# ==========================================
+# AVAILABLE FOREX PAIRS
+# ==========================================
+
+PAIRS = {
+    "EURUSD": ("EUR/USD", "EURUSD=X"),
+    "GBPUSD": ("GBP/USD", "GBPUSD=X"),
+    "USDJPY": ("USD/JPY", "JPY=X"),
+    "EURJPY": ("EUR/JPY", "EURJPY=X"),
+    "AUDUSD": ("AUD/USD", "AUDUSD=X"),
+    "USDCAD": ("USD/CAD", "CAD=X"),
+    "NZDUSD": ("NZD/USD", "NZDUSD=X"),
+    "GBPJPY": ("GBP/JPY", "GBPJPY=X"),
+    "EURGBP": ("EUR/GBP", "EURGBP=X"),
+    "USDCHF": ("USD/CHF", "CHF=X"),
+}
 
 
 # ==========================================
@@ -53,27 +69,85 @@ def web_server():
 
 
 # ==========================================
-# GET MARKET DATA
+# DOWNLOAD MARKET DATA
 # ==========================================
 
-def get_market_data():
+def get_market_data(symbol):
+
+    end_time = int(time.time())
+    start_time = end_time - (60 * 60 * 24)
+
+    params = urlencode({
+        "period1": start_time,
+        "period2": end_time,
+        "interval": "5m",
+        "events": "history",
+        "includeAdjustedClose": "true"
+    })
 
     url = (
-        "https://api.binance.com/api/v3/klines"
-        "?symbol=BTCUSDT"
-        "&interval=5m"
-        "&limit=100"
+        "https://query1.finance.yahoo.com/v8/finance/chart/"
+        + symbol
+        + "?"
+        + params
     )
 
-    with urlopen(url, timeout=10) as response:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
 
-        data = response.read().decode()
+    with urlopen(request, timeout=15) as response:
 
-        return json.loads(data)
+        raw = response.read().decode()
+
+        result = json.loads(raw)
+
+    chart = result.get("chart", {})
+
+    if chart.get("error"):
+        raise Exception(
+            str(chart["error"])
+        )
+
+    results = chart.get("result")
+
+    if not results:
+        raise Exception("Yahoo Finance থেকে data পাওয়া যায়নি")
+
+    result_data = results[0]
+
+    timestamps = result_data.get("timestamp", [])
+    quote = result_data.get("indicators", {}).get(
+        "quote", []
+    )
+
+    if not quote:
+        raise Exception("Price data পাওয়া যায়নি")
+
+    closes = quote[0].get("close", [])
+
+    clean_closes = []
+
+    for value in closes:
+
+        if value is not None:
+
+            clean_closes.append(float(value))
+
+    if len(clean_closes) < 30:
+
+        raise Exception(
+            "যথেষ্ট 5-minute candle পাওয়া যায়নি"
+        )
+
+    return clean_closes
 
 
 # ==========================================
-# EMA CALCULATION
+# EMA
 # ==========================================
 
 def calculate_ema(closes, period):
@@ -94,7 +168,7 @@ def calculate_ema(closes, period):
 
 
 # ==========================================
-# RSI CALCULATION
+# RSI
 # ==========================================
 
 def calculate_rsi(closes, period=14):
@@ -119,63 +193,50 @@ def calculate_rsi(closes, period=14):
     if len(gains) < period:
         return 50
 
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    avg_gain = sum(
+        gains[-period:]
+    ) / period
+
+    avg_loss = sum(
+        losses[-period:]
+    ) / period
 
     if avg_loss == 0:
-
         return 100
 
     rs = avg_gain / avg_loss
 
-    rsi = 100 - (
+    return 100 - (
         100 / (1 + rs)
     )
 
-    return rsi
-
 
 # ==========================================
-# CALCULATE SIGNAL
+# SIGNAL
 # ==========================================
 
-def calculate_signal():
-
-    data = get_market_data()
-
-    if not data or len(data) < 30:
-        raise Exception("Not enough market data")
-
-    closes = [
-        float(candle[4])
-        for candle in data
-    ]
+def calculate_signal(closes):
 
     price = closes[-1]
+    previous_price = closes[-2]
 
-    # EMA 9
     ema9 = calculate_ema(
         closes,
         9
     )
 
-    # EMA 21
     ema21 = calculate_ema(
         closes,
         21
     )
 
-    # RSI 14
     rsi = calculate_rsi(
         closes,
         14
     )
 
-    # Recent price movement
-    previous_price = closes[-2]
-
     # ======================================
-    # SIGNAL RULES
+    # UP
     # ======================================
 
     if (
@@ -186,6 +247,10 @@ def calculate_signal():
 
         signal = "🟢 UP"
 
+    # ======================================
+    # DOWN
+    # ======================================
+
     elif (
         ema9 < ema21
         and rsi <= 45
@@ -193,6 +258,10 @@ def calculate_signal():
     ):
 
         signal = "🔴 DOWN"
+
+    # ======================================
+    # WAIT
+    # ======================================
 
     else:
 
@@ -208,7 +277,7 @@ def calculate_signal():
 
 
 # ==========================================
-# /START COMMAND
+# /START
 # ==========================================
 
 async def start(
@@ -218,21 +287,50 @@ async def start(
 
     await update.message.reply_text(
 
-        "🤖 MH Quotex Signal Bot চালু হয়েছে!\n\n"
+        "🤖 MH Quotex Signal Bot\n\n"
 
-        "📊 BTC/USDT signal দেখতে "
-        "/signal লিখুন।\n\n"
+        "📊 /pairs → Available pairs\n\n"
 
-        "🟢 UP = দাম উপরের দিকে যাওয়ার সম্ভাবনা\n"
-        "🔴 DOWN = দাম নিচের দিকে যাওয়ার সম্ভাবনা\n"
-        "🟡 WAIT = পরিষ্কার signal নেই\n\n"
+        "উদাহরণ:\n"
+        "/signal EURUSD\n"
+        "/signal GBPUSD\n"
+        "/signal USDJPY\n\n"
+
+        "🟢 UP\n"
+        "🔴 DOWN\n"
+        "🟡 WAIT\n\n"
 
         "⏱️ Timeframe: 5 মিনিট"
     )
 
 
 # ==========================================
-# /SIGNAL COMMAND
+# /PAIRS
+# ==========================================
+
+async def pairs(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    text = "📋 AVAILABLE PAIRS\n\n"
+
+    for code, data in PAIRS.items():
+
+        text += (
+            f"• {code} = {data[0]}\n"
+        )
+
+    text += (
+        "\nউদাহরণ:\n"
+        "/signal EURUSD"
+    )
+
+    await update.message.reply_text(text)
+
+
+# ==========================================
+# /SIGNAL
 # ==========================================
 
 async def signal(
@@ -240,7 +338,48 @@ async def signal(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not context.args:
+
+        await update.message.reply_text(
+
+            "❗ Pair লিখুন।\n\n"
+
+            "উদাহরণ:\n"
+            "/signal EURUSD\n"
+            "/signal GBPUSD\n"
+            "/signal USDJPY\n\n"
+
+            "সব pair দেখতে /pairs লিখুন।"
+        )
+
+        return
+
+
+    code = context.args[0].upper()
+
+    if code not in PAIRS:
+
+        await update.message.reply_text(
+
+            "❌ এই pair পাওয়া যায়নি।\n\n"
+            "Available pair দেখতে /pairs লিখুন।"
+        )
+
+        return
+
+
+    pair_name, yahoo_symbol = PAIRS[code]
+
+
+    # ======================================
+    # GET DATA
+    # ======================================
+
     try:
+
+        closes = get_market_data(
+            yahoo_symbol
+        )
 
         (
             price,
@@ -248,47 +387,62 @@ async def signal(
             ema21,
             rsi,
             result
-        ) = calculate_signal()
-
-
-        # ==================================
-        # SIGNAL MESSAGE
-        # ==================================
-
-        message = (
-
-            "📊 MH QUOTEX SIGNAL\n\n"
-
-            f"💱 BTC/USDT: ${price:,.2f}\n\n"
-
-            f"📈 EMA 9: {ema9:,.2f}\n"
-            f"📉 EMA 21: {ema21:,.2f}\n"
-            f"📊 RSI 14: {rsi:.2f}\n\n"
-
-            f"🎯 SIGNAL: {result}\n\n"
-
-            "⏱️ Timeframe: 5 মিনিট\n\n"
-
-            "━━━━━━━━━━━━━━\n"
-
-            "⚠️ এটি indicator-based signal।\n"
-            "Quotex-এর chart/price-এর সাথে মিলিয়ে "
-            "তারপর সিদ্ধান্ত নিন।\n\n"
-
-            "❌ কোনো signal 100% নিশ্চিত নয়।"
-        )
-
-
-        await update.message.reply_text(message)
+        ) = calculate_signal(closes)
 
 
     except Exception as e:
 
         await update.message.reply_text(
 
-            "❌ Market data পাওয়া যাচ্ছে না।\n\n"
-            "কিছুক্ষণ পরে আবার /signal দিন।"
+            "❌ Market data পাওয়া যায়নি।\n\n"
+
+            f"Pair: {pair_name}\n"
+            "Source: Yahoo Finance\n\n"
+
+            f"সমস্যা: {str(e)[:300]}"
         )
+
+        return
+
+
+    # ======================================
+    # RESULT
+    # ======================================
+
+    message = (
+
+        "📊 MH FOREX SIGNAL\n\n"
+
+        f"💱 Pair: {pair_name}\n"
+
+        "📡 Source: Yahoo Finance\n"
+
+        "⏱️ Timeframe: 5 মিনিট\n\n"
+
+        f"💰 Price: {price:.5f}\n"
+
+        f"📈 EMA 9: {ema9:.5f}\n"
+
+        f"📉 EMA 21: {ema21:.5f}\n"
+
+        f"📊 RSI 14: {rsi:.2f}\n\n"
+
+        f"🎯 SIGNAL: {result}\n\n"
+
+        "━━━━━━━━━━━━━━\n"
+
+        "⚠️ এটি indicator-based signal।\n"
+
+        "Quotex-এর নিজস্ব chart/OTC price-এর "
+        "সাথে মিলিয়ে নিন।\n\n"
+
+        "❌ 100% নিশ্চিত signal নয়।"
+    )
+
+
+    await update.message.reply_text(
+        message
+    )
 
 
 # ==========================================
@@ -297,14 +451,12 @@ async def signal(
 
 async def main():
 
-    # Render server
     threading.Thread(
         target=web_server,
         daemon=True
     ).start()
 
 
-    # Telegram application
     app = (
         Application
         .builder()
@@ -313,13 +465,21 @@ async def main():
     )
 
 
-    # Commands
     app.add_handler(
         CommandHandler(
             "start",
             start
         )
     )
+
+
+    app.add_handler(
+        CommandHandler(
+            "pairs",
+            pairs
+        )
+    )
+
 
     app.add_handler(
         CommandHandler(
@@ -329,7 +489,6 @@ async def main():
     )
 
 
-    # Start bot
     await app.initialize()
 
     await app.start()
@@ -339,7 +498,6 @@ async def main():
     )
 
 
-    # Keep running
     while True:
 
         await asyncio.sleep(3600)
