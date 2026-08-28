@@ -1,276 +1,72 @@
-import requests
 import time
+import requests
+import pandas as pd
+import yfinance as yf
 from datetime import datetime
 
-# ==================================================
+# ==============================
 # TELEGRAM SETTINGS
-# ==================================================
+# ==============================
 
-BOT_TOKEN = 8637932469:AAFP_9CT0trr87XeVliTYVjPquK83ujQ7Tc
+BOT_TOKEN =8637932469:AAFP_9CT0trr87XeVliTYVjPquK83ujQ7Tc
 CHAT_ID =8760497927
 
-# ==================================================
+# ==============================
 # SETTINGS
-# ==================================================
-
-SIGNAL_INTERVAL = 120  # 2 minutes
+# ==============================
 
 PAIRS = {
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "USDJPY=X",
+    "USDJPY": "JPY=X",
     "EURJPY": "EURJPY=X",
     "AUDUSD": "AUDUSD=X",
-    "USDCAD": "USDCAD=X",
-    "NZDUSD": "NZDUSD=X",
+    "USDCAD": "CAD=X",
     "GBPJPY": "GBPJPY=X",
-    "EURGBP": "EURGBP=X",
-    "USDCHF": "USDCHF=X"
+    "EURGBP": "EURGBP=X"
 }
 
-last_update_id = 0
+TIMEFRAME = "1m"
+PERIOD = "1d"
+
+# নতুন signal প্রতি 2 মিনিটে
+SIGNAL_INTERVAL = 120
 
 
-# ==================================================
-# TELEGRAM SEND MESSAGE
-# ==================================================
+# ==============================
+# TELEGRAM
+# ==============================
 
-def send_message(text):
+def send_message(message):
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
+    data = {
+        "chat_id": CHAT_ID,
+        "text": message
+    }
+
     try:
-        r = requests.post(
-            url,
-            data={
-                "chat_id": CHAT_ID,
-                "text": text
-            },
-            timeout=15
-        )
+        response = requests.post(url, data=data, timeout=15)
 
-        if r.status_code != 200:
-            print("Telegram error:", r.text)
-
-        else:
-            print("Telegram message sent.")
+        if response.status_code != 200:
+            print("Telegram error:", response.text)
 
     except Exception as e:
         print("Telegram connection error:", e)
 
 
-# ==================================================
-# GET TELEGRAM COMMANDS
-# ==================================================
-
-def check_commands():
-
-    global last_update_id
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-
-    try:
-
-        r = requests.get(
-            url,
-            params={
-                "offset": last_update_id + 1,
-                "timeout": 5
-            },
-            timeout=10
-        )
-
-        data = r.json()
-
-        if not data.get("ok"):
-            return
-
-        for update in data.get("result", []):
-
-            last_update_id = update["update_id"]
-
-            message = update.get("message")
-
-            if not message:
-                continue
-
-            text = message.get("text", "").strip()
-
-            user_chat_id = message["chat"]["id"]
-
-            # -------------------------------
-            # START
-            # -------------------------------
-
-            if text == "/start":
-
-                send_to_chat(
-                    user_chat_id,
-                    "🤖 Happy Signal Bot is ONLINE!\n\n"
-                    "Commands:\n"
-                    "/signal - Get signal now\n"
-                    "/start - Bot status\n\n"
-                    "⏱️ Automatic signal every 2 minutes."
-                )
-
-            # -------------------------------
-            # SIGNAL
-            # -------------------------------
-
-            elif text == "/signal":
-
-                send_to_chat(
-                    user_chat_id,
-                    "⏳ Checking market...\nPlease wait."
-                )
-
-                message_text = generate_signals()
-
-                send_to_chat(
-                    user_chat_id,
-                    message_text
-                )
-
-    except Exception as e:
-
-        print("Command error:", e)
-
-
-# ==================================================
-# SEND TO SPECIFIC CHAT
-# ==================================================
-
-def send_to_chat(chat_id, text):
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    try:
-
-        requests.post(
-            url,
-            data={
-                "chat_id": chat_id,
-                "text": text
-            },
-            timeout=15
-        )
-
-    except Exception as e:
-
-        print("Send error:", e)
-
-
-# ==================================================
-# GET FOREX DATA FROM YAHOO FINANCE
-# ==================================================
-
-def get_prices(symbol):
-
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-
-    params = {
-        "interval": "1m",
-        "range": "1d"
-    }
-
-    try:
-
-        r = requests.get(
-            url,
-            params=params,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            },
-            timeout=15
-        )
-
-        data = r.json()
-
-        result = data["chart"]["result"]
-
-        if not result:
-            return []
-
-        indicators = result[0]["indicators"]["quote"][0]
-
-        closes = indicators.get("close", [])
-
-        prices = [
-            float(x)
-            for x in closes
-            if x is not None
-        ]
-
-        return prices
-
-    except Exception as e:
-
-        print("Market data error:", symbol, e)
-
-        return []
-
-
-# ==================================================
-# EMA
-# ==================================================
-
-def ema(values, period):
-
-    if len(values) < period:
-        return None
-
-    multiplier = 2 / (period + 1)
-
-    ema_value = sum(values[:period]) / period
-
-    for price in values[period:]:
-
-        ema_value = (
-            (price - ema_value) * multiplier
-        ) + ema_value
-
-    return ema_value
-
-
-# ==================================================
+# ==============================
 # RSI
-# ==================================================
+# ==============================
 
-def calculate_rsi(values, period=14):
+def calculate_rsi(series, period=14):
 
-    if len(values) < period + 1:
-        return None
+    delta = series.diff()
 
-    gains = []
-    losses = []
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    for i in range(1, len(values)):
-
-        change = values[i] - values[i - 1]
-
-        if change > 0:
-            gains.append(change)
-            losses.append(0)
-
-        else:
-            gains.append(0)
-            losses.append(abs(change))
-
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-
-        avg_gain = (
-            (avg_gain * (period - 1)) + gains[i]
-        ) / period
-
-        avg_loss = (
-            (avg_loss * (period - 1)) + losses[i]
-        ) / period
-
-    if avg_loss == 0:
-        return 100
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss
 
@@ -279,217 +75,216 @@ def calculate_rsi(values, period=14):
     return rsi
 
 
-# ==================================================
-# ANALYZE PAIR
-# ==================================================
+# ==============================
+# GET DATA
+# ==============================
 
-def analyze_pair(pair, symbol):
+def get_data(symbol):
 
-    prices = get_prices(symbol)
+    try:
 
-    if len(prices) < 30:
+        data = yf.download(
+            symbol,
+            period=PERIOD,
+            interval=TIMEFRAME,
+            progress=False,
+            auto_adjust=False
+        )
 
-        return {
-            "pair": pair,
-            "signal": "WAIT",
-            "rsi": None,
-            "reason": "Not enough data"
-        }
+        if data.empty:
+            return None
 
-    ema9 = ema(prices, 9)
-    ema21 = ema(prices, 21)
-    rsi = calculate_rsi(prices)
+        # কিছু yfinance version-এ MultiIndex থাকে
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
 
-    if ema9 is None or ema21 is None or rsi is None:
+        data = data.dropna()
 
-        return {
-            "pair": pair,
-            "signal": "WAIT",
-            "rsi": rsi,
-            "reason": "Indicator error"
-        }
+        if len(data) < 30:
+            return None
+
+        return data
+
+    except Exception as e:
+
+        print(symbol, "data error:", e)
+
+        return None
+
+
+# ==============================
+# SIGNAL
+# ==============================
+
+def generate_signal(data):
+
+    close = data["Close"]
+
+    ema9 = close.ewm(span=9, adjust=False).mean()
+    ema21 = close.ewm(span=21, adjust=False).mean()
+
+    rsi = calculate_rsi(close)
+
+    price = float(close.iloc[-1])
+    e9 = float(ema9.iloc[-1])
+    e21 = float(ema21.iloc[-1])
+    r = float(rsi.iloc[-1])
+
+    # --------------------------
+    # UP condition
+    # --------------------------
 
     up_score = 0
-    down_score = 0
 
-    # --------------------------------
-    # EMA TREND
-    # --------------------------------
-
-    if ema9 > ema21:
-        up_score += 2
-
-    elif ema9 < ema21:
-        down_score += 2
-
-    # --------------------------------
-    # RSI
-    # --------------------------------
-
-    if rsi >= 55:
-        up_score += 2
-
-    elif rsi <= 45:
-        down_score += 2
-
-    elif rsi > 50:
+    if e9 > e21:
         up_score += 1
 
-    elif rsi < 50:
+    if price > e9:
+        up_score += 1
+
+    if r > 50:
+        up_score += 1
+
+    # --------------------------
+    # DOWN condition
+    # --------------------------
+
+    down_score = 0
+
+    if e9 < e21:
         down_score += 1
 
-    # --------------------------------
-    # FINAL SIGNAL
-    # --------------------------------
+    if price < e9:
+        down_score += 1
 
-    if up_score >= 3 and up_score > down_score:
+    if r < 50:
+        down_score += 1
 
-        signal = "UP"
+    # --------------------------
+    # Signal
+    # --------------------------
 
-    elif down_score >= 3 and down_score > up_score:
+    if up_score >= 2 and up_score > down_score:
 
-        signal = "DOWN"
+        signal = "🟢 UP"
+
+    elif down_score >= 2 and down_score > up_score:
+
+        signal = "🔴 DOWN"
 
     else:
 
-        signal = "WAIT"
+        signal = "⚪ NO SIGNAL"
 
-    return {
-        "pair": pair,
-        "signal": signal,
-        "rsi": rsi,
-        "reason": f"UP={up_score} DOWN={down_score}"
-    }
+    return signal, price, r, e9, e21
 
 
-# ==================================================
-# GENERATE ALL SIGNALS
-# ==================================================
+# ==============================
+# CREATE SIGNAL MESSAGE
+# ==============================
 
-def generate_signals():
+def create_message():
 
     now = datetime.now().strftime("%H:%M:%S")
 
-    text = (
-        "📊 2-MINUTE FOREX SIGNAL\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕒 Time: {now}\n\n"
+    message = (
+        "📡 SIGNAL UPDATE\n\n"
+        "📊 Timeframe: 1 minute\n"
+        f"⏰ Time: {now}\n"
+        "🔄 New signal every 2 minutes\n\n"
     )
 
-    up_count = 0
-    down_count = 0
-    wait_count = 0
+    found = False
 
     for pair, symbol in PAIRS.items():
 
-        print("Checking:", pair)
+        data = get_data(symbol)
 
-        result = analyze_pair(pair, symbol)
+        if data is None:
 
-        signal = result["signal"]
-        rsi = result["rsi"]
+            message += (
+                f"💱 {pair}\n"
+                "⚪ NO DATA\n\n"
+            )
 
-        if signal == "UP":
+            continue
 
-            emoji = "🟢"
-            up_count += 1
+        try:
 
-        elif signal == "DOWN":
+            signal, price, rsi, ema9, ema21 = generate_signal(data)
 
-            emoji = "🔴"
-            down_count += 1
+            found = True
 
-        else:
+            message += (
+                f"💱 {pair}\n"
+                f"💰 Price: {price:.5f}\n"
+                f"📊 RSI: {rsi:.2f}\n"
+                f"📈 EMA9: {ema9:.5f}\n"
+                f"📉 EMA21: {ema21:.5f}\n"
+                f"🎯 {signal}\n\n"
+            )
 
-            emoji = "⚪"
-            wait_count += 1
+        except Exception as e:
 
-        if rsi is None:
-            rsi_text = "N/A"
-        else:
-            rsi_text = f"{rsi:.1f}"
+            print(pair, "signal error:", e)
 
-        text += (
-            f"{emoji} {pair}: {signal}\n"
-            f"   RSI: {rsi_text}\n\n"
-        )
+            message += (
+                f"💱 {pair}\n"
+                "⚪ NO SIGNAL\n\n"
+            )
 
-        time.sleep(1)
-
-    text += (
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 UP: {up_count}\n"
-        f"🔴 DOWN: {down_count}\n"
-        f"⚪ WAIT: {wait_count}\n\n"
-        "⏱️ Next signal: 2 minutes\n"
+    message += (
         "⚠️ Indicator-based signal only.\n"
+        "Quotex/OTC price may differ from the data source.\n"
         "❌ No signal is 100% guaranteed."
     )
 
-    return text
+    return message
 
 
-# ==================================================
-# MAIN BOT
-# ==================================================
+# ==============================
+# MAIN LOOP
+# ==============================
 
 def main():
 
-    print("======================================")
-    print("      HAPPY SIGNAL BOT STARTED")
-    print("======================================")
+    print("================================")
+    print("Telegram Signal Bot Started")
+    print("Timeframe: 1 minute")
+    print("Signal interval: 2 minutes")
+    print("================================")
 
     send_message(
-        "🤖 Happy Signal Bot is ONLINE!\n\n"
-        "🟢 UP\n"
-        "🔴 DOWN\n"
-        "⚪ WAIT\n\n"
-        "⏱️ Automatic signal every 2 minutes."
+        "🤖 Signal Bot Started!\n\n"
+        "📊 Timeframe: 1 minute\n"
+        "🔄 New signal every 2 minutes\n\n"
+        "Waiting for signal..."
     )
 
     while True:
 
         try:
 
-            # Check Telegram commands
-            check_commands()
+            print("\nGenerating new signals...")
 
-            print("\nGenerating automatic signals...")
+            message = create_message()
 
-            signal_message = generate_signals()
+            send_message(message)
 
-            send_message(signal_message)
-
-            print("Signal sent.")
-            print("Waiting 2 minutes...")
-
-            # Wait 2 minutes
-            for _ in range(120):
-
-                check_commands()
-
-                time.sleep(1)
-
-        except KeyboardInterrupt:
-
-            print("Bot stopped.")
-
-            send_message(
-                "🛑 Happy Signal Bot stopped."
-            )
-
-            break
+            print("Signal sent successfully.")
 
         except Exception as e:
 
-            print("MAIN ERROR:", e)
+            print("Main error:", e)
 
-            time.sleep(30)
+        print("Waiting 2 minutes...")
+
+        time.sleep(SIGNAL_INTERVAL)
 
 
-# ==================================================
+# ==============================
 # START
-# ==================================================
+# ==============================
 
 if __name__ == "__main__":
     main()
