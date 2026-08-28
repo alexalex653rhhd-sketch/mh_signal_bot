@@ -1,177 +1,245 @@
+import requests
+import time
+from datetime import datetime
 
-import os
-import json
-import asyncio
-import threading
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from concurrent.futures import ThreadPoolExecutor
+# ==================================================
+# TELEGRAM SETTINGS
+# ==================================================
 
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
+CHAT_ID = "PASTE_YOUR_CHAT_ID_HERE"
 
+# ==================================================
+# SETTINGS
+# ==================================================
 
-# =========================================================
-# CONFIG
-# =========================================================
+SIGNAL_INTERVAL = 120  # 2 minutes
 
-TOKEN = os.getenv("BOT_TOKEN")
-
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is missing.")
-
-
-# Yahoo Finance symbols
 PAIRS = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
+    "USDJPY": "USDJPY=X",
     "EURJPY": "EURJPY=X",
     "AUDUSD": "AUDUSD=X",
-    "USDCAD": "CAD=X",
+    "USDCAD": "USDCAD=X",
     "NZDUSD": "NZDUSD=X",
     "GBPJPY": "GBPJPY=X",
     "EURGBP": "EURGBP=X",
-    "USDCHF": "CHF=X",
+    "USDCHF": "USDCHF=X"
 }
 
-
-# =========================================================
-# KEEP RENDER SERVICE ALIVE
-# =========================================================
-
-class HealthHandler(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"MH Signal Bot is running.")
-
-    def log_message(self, format, *args):
-        pass
+last_update_id = 0
 
 
-def web_server():
-    port = int(os.environ.get("PORT", 10000))
+# ==================================================
+# TELEGRAM SEND MESSAGE
+# ==================================================
 
-    server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler
-    )
+def send_message(text):
 
-    print(f"Web server running on port {port}")
-    server.serve_forever()
-
-
-# =========================================================
-# GET MARKET DATA
-# =========================================================
-
-def get_market_data(pair):
-    """
-    Get 5-minute forex candles from Yahoo Finance.
-    """
-
-    if pair not in PAIRS:
-        raise ValueError("Unsupported pair.")
-
-    symbol = PAIRS[pair]
-
-    url = (
-        "https://query1.finance.yahoo.com/v8/finance/chart/"
-        + symbol
-        + "?interval=5m&range=1d"
-    )
-
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        }
-    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     try:
-        with urlopen(request, timeout=15) as response:
-            data = json.loads(
-                response.read().decode("utf-8")
-            )
+        r = requests.post(
+            url,
+            data={
+                "chat_id": CHAT_ID,
+                "text": text
+            },
+            timeout=15
+        )
+
+        if r.status_code != 200:
+            print("Telegram error:", r.text)
+
+        else:
+            print("Telegram message sent.")
+
+    except Exception as e:
+        print("Telegram connection error:", e)
+
+
+# ==================================================
+# GET TELEGRAM COMMANDS
+# ==================================================
+
+def check_commands():
+
+    global last_update_id
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+
+    try:
+
+        r = requests.get(
+            url,
+            params={
+                "offset": last_update_id + 1,
+                "timeout": 5
+            },
+            timeout=10
+        )
+
+        data = r.json()
+
+        if not data.get("ok"):
+            return
+
+        for update in data.get("result", []):
+
+            last_update_id = update["update_id"]
+
+            message = update.get("message")
+
+            if not message:
+                continue
+
+            text = message.get("text", "").strip()
+
+            user_chat_id = message["chat"]["id"]
+
+            # -------------------------------
+            # START
+            # -------------------------------
+
+            if text == "/start":
+
+                send_to_chat(
+                    user_chat_id,
+                    "🤖 Happy Signal Bot is ONLINE!\n\n"
+                    "Commands:\n"
+                    "/signal - Get signal now\n"
+                    "/start - Bot status\n\n"
+                    "⏱️ Automatic signal every 2 minutes."
+                )
+
+            # -------------------------------
+            # SIGNAL
+            # -------------------------------
+
+            elif text == "/signal":
+
+                send_to_chat(
+                    user_chat_id,
+                    "⏳ Checking market...\nPlease wait."
+                )
+
+                message_text = generate_signals()
+
+                send_to_chat(
+                    user_chat_id,
+                    message_text
+                )
+
+    except Exception as e:
+
+        print("Command error:", e)
+
+
+# ==================================================
+# SEND TO SPECIFIC CHAT
+# ==================================================
+
+def send_to_chat(chat_id, text):
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    try:
+
+        requests.post(
+            url,
+            data={
+                "chat_id": chat_id,
+                "text": text
+            },
+            timeout=15
+        )
+
+    except Exception as e:
+
+        print("Send error:", e)
+
+
+# ==================================================
+# GET FOREX DATA FROM YAHOO FINANCE
+# ==================================================
+
+def get_prices(symbol):
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+    params = {
+        "interval": "1m",
+        "range": "1d"
+    }
+
+    try:
+
+        r = requests.get(
+            url,
+            params=params,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout=15
+        )
+
+        data = r.json()
 
         result = data["chart"]["result"]
 
         if not result:
-            raise RuntimeError("Yahoo Finance returned no data.")
+            return []
 
-        result = result[0]
+        indicators = result[0]["indicators"]["quote"][0]
 
-        quote = result["indicators"]["quote"][0]
+        closes = indicators.get("close", [])
 
-        closes = quote.get("close", [])
-
-        clean_closes = [
+        prices = [
             float(x)
             for x in closes
             if x is not None
         ]
 
-        if len(clean_closes) < 30:
-            raise RuntimeError(
-                "Not enough market candles."
-            )
-
-        return clean_closes
-
-    except HTTPError as e:
-        raise RuntimeError(
-            f"Yahoo Finance HTTP error: {e.code}"
-        )
-
-    except URLError:
-        raise RuntimeError(
-            "Market data connection failed."
-        )
+        return prices
 
     except Exception as e:
-        raise RuntimeError(
-            f"Market data error: {str(e)}"
-        )
+
+        print("Market data error:", symbol, e)
+
+        return []
 
 
-# =========================================================
+# ==================================================
 # EMA
-# =========================================================
+# ==================================================
 
-def calculate_ema(values, period):
+def ema(values, period):
 
     if len(values) < period:
-        raise ValueError("Not enough data for EMA.")
+        return None
 
     multiplier = 2 / (period + 1)
 
-    ema = sum(values[:period]) / period
+    ema_value = sum(values[:period]) / period
 
     for price in values[period:]:
-        ema = (
-            (price - ema) * multiplier
-            + ema
-        )
 
-    return ema
+        ema_value = (
+            (price - ema_value) * multiplier
+        ) + ema_value
+
+    return ema_value
 
 
-# =========================================================
+# ==================================================
 # RSI
-# =========================================================
+# ==================================================
 
 def calculate_rsi(values, period=14):
 
     if len(values) < period + 1:
-        raise ValueError("Not enough data for RSI.")
+        return None
 
     gains = []
     losses = []
@@ -188,403 +256,240 @@ def calculate_rsi(values, period=14):
             gains.append(0)
             losses.append(abs(change))
 
-    recent_gains = gains[-period:]
-    recent_losses = losses[-period:]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
 
-    avg_gain = sum(recent_gains) / period
-    avg_loss = sum(recent_losses) / period
+    for i in range(period, len(gains)):
+
+        avg_gain = (
+            (avg_gain * (period - 1)) + gains[i]
+        ) / period
+
+        avg_loss = (
+            (avg_loss * (period - 1)) + losses[i]
+        ) / period
 
     if avg_loss == 0:
-        return 100.0
+        return 100
 
     rs = avg_gain / avg_loss
 
-    rsi = 100 - (
-        100 / (1 + rs)
-    )
+    rsi = 100 - (100 / (1 + rs))
 
     return rsi
 
 
-# =========================================================
-# CALCULATE SIGNAL
-# =========================================================
+# ==================================================
+# ANALYZE PAIR
+# ==================================================
 
-def calculate_signal(pair):
+def analyze_pair(pair, symbol):
 
-    closes = get_market_data(pair)
+    prices = get_prices(symbol)
 
-    price = closes[-1]
+    if len(prices) < 30:
 
-    ema9 = calculate_ema(
-        closes,
-        9
-    )
+        return {
+            "pair": pair,
+            "signal": "WAIT",
+            "rsi": None,
+            "reason": "Not enough data"
+        }
 
-    ema21 = calculate_ema(
-        closes,
-        21
-    )
+    ema9 = ema(prices, 9)
+    ema21 = ema(prices, 21)
+    rsi = calculate_rsi(prices)
 
-    rsi = calculate_rsi(
-        closes,
-        14
-    )
+    if ema9 is None or ema21 is None or rsi is None:
 
-    # -----------------------------------------
-    # SIGNAL RULE
-    # -----------------------------------------
+        return {
+            "pair": pair,
+            "signal": "WAIT",
+            "rsi": rsi,
+            "reason": "Indicator error"
+        }
 
-    # Stronger UP condition
-    if ema9 > ema21 and rsi >= 55:
-        signal = "🟢 UP"
+    up_score = 0
+    down_score = 0
 
-    # Stronger DOWN condition
-    elif ema9 < ema21 and rsi <= 45:
-        signal = "🔴 DOWN"
+    # --------------------------------
+    # EMA TREND
+    # --------------------------------
 
-    # No clear direction
+    if ema9 > ema21:
+        up_score += 2
+
+    elif ema9 < ema21:
+        down_score += 2
+
+    # --------------------------------
+    # RSI
+    # --------------------------------
+
+    if rsi >= 55:
+        up_score += 2
+
+    elif rsi <= 45:
+        down_score += 2
+
+    elif rsi > 50:
+        up_score += 1
+
+    elif rsi < 50:
+        down_score += 1
+
+    # --------------------------------
+    # FINAL SIGNAL
+    # --------------------------------
+
+    if up_score >= 3 and up_score > down_score:
+
+        signal = "UP"
+
+    elif down_score >= 3 and down_score > up_score:
+
+        signal = "DOWN"
+
     else:
-        signal = "🟡 WAIT"
+
+        signal = "WAIT"
 
     return {
         "pair": pair,
-        "price": price,
-        "ema9": ema9,
-        "ema21": ema21,
-        "rsi": rsi,
         "signal": signal,
+        "rsi": rsi,
+        "reason": f"UP={up_score} DOWN={down_score}"
     }
 
 
-# =========================================================
-# FORMAT SIGNAL
-# =========================================================
+# ==================================================
+# GENERATE ALL SIGNALS
+# ==================================================
 
-def format_signal(data):
+def generate_signals():
 
-    return (
-        "📊 MH FOREX SIGNAL\n\n"
+    now = datetime.now().strftime("%H:%M:%S")
 
-        f"💱 Pair: {data['pair']}\n"
-        "⏱️ Timeframe: 5 মিনিট\n"
-        "📡 Source: Yahoo Finance\n\n"
-
-        f"💰 Price: {data['price']:.5f}\n"
-        f"📈 EMA 9: {data['ema9']:.5f}\n"
-        f"📉 EMA 21: {data['ema21']:.5f}\n"
-        f"📊 RSI 14: {data['rsi']:.2f}\n\n"
-
-        f"🎯 SIGNAL: {data['signal']}\n\n"
-
-        "⚠️ Indicator-based signal.\n"
-        "Quotex-এর chart/OTC price-এর সাথে মিলিয়ে নিন।\n\n"
-
-        "❌ 100% নিশ্চিত signal নয়।"
+    text = (
+        "📊 2-MINUTE FOREX SIGNAL\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 Time: {now}\n\n"
     )
 
+    up_count = 0
+    down_count = 0
+    wait_count = 0
 
-# =========================================================
-# /START
-# =========================================================
+    for pair, symbol in PAIRS.items():
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+        print("Checking:", pair)
 
-    await update.message.reply_text(
-        "🤖 MH Signal Bot চালু হয়েছে!\n\n"
+        result = analyze_pair(pair, symbol)
 
-        "📊 একটি pair-এর signal দেখতে:\n"
-        "/signal EURUSD\n"
-        "/signal GBPUSD\n"
-        "/signal USDJPY\n\n"
+        signal = result["signal"]
+        rsi = result["rsi"]
 
-        "📋 সব pair দেখতে:\n"
-        "/pairs\n\n"
+        if signal == "UP":
 
-        "🚀 সব pair-এর UP/DOWN signal দেখতে:\n"
-        "/signals"
-    )
+            emoji = "🟢"
+            up_count += 1
 
+        elif signal == "DOWN":
 
-# =========================================================
-# /PAIRS
-# =========================================================
+            emoji = "🔴"
+            down_count += 1
 
-async def pairs(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+        else:
 
-    text = "📋 AVAILABLE PAIRS\n\n"
+            emoji = "⚪"
+            wait_count += 1
 
-    for pair in PAIRS:
-        text += f"• {pair}\n"
+        if rsi is None:
+            rsi_text = "N/A"
+        else:
+            rsi_text = f"{rsi:.1f}"
+
+        text += (
+            f"{emoji} {pair}: {signal}\n"
+            f"   RSI: {rsi_text}\n\n"
+        )
+
+        time.sleep(1)
 
     text += (
-        "\nউদাহরণ:\n"
-        "/signal EURUSD\n\n"
-        "সব signal:\n"
-        "/signals"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 UP: {up_count}\n"
+        f"🔴 DOWN: {down_count}\n"
+        f"⚪ WAIT: {wait_count}\n\n"
+        "⏱️ Next signal: 2 minutes\n"
+        "⚠️ Indicator-based signal only.\n"
+        "❌ No signal is 100% guaranteed."
     )
 
-    await update.message.reply_text(text)
+    return text
 
 
-# =========================================================
-# /SIGNAL
-# =========================================================
+# ==================================================
+# MAIN BOT
+# ==================================================
 
-async def signal(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+def main():
 
-    if not context.args:
+    print("======================================")
+    print("      HAPPY SIGNAL BOT STARTED")
+    print("======================================")
 
-        await update.message.reply_text(
-            "❗ Pair লিখুন।\n\n"
-            "উদাহরণ:\n"
-            "/signal EURUSD\n"
-            "/signal GBPUSD\n"
-            "/signal USDJPY\n\n"
-            "সব pair দেখতে /pairs লিখুন।"
-        )
-
-        return
-
-    pair = context.args[0].upper()
-
-    if pair not in PAIRS:
-
-        await update.message.reply_text(
-            "❌ এই pair পাওয়া যায়নি।\n\n"
-            "সব available pair দেখতে:\n"
-            "/pairs"
-        )
-
-        return
-
-    # Loading message
-    loading = await update.message.reply_text(
-        f"⏳ {pair} market data পরীক্ষা করছি..."
+    send_message(
+        "🤖 Happy Signal Bot is ONLINE!\n\n"
+        "🟢 UP\n"
+        "🔴 DOWN\n"
+        "⚪ WAIT\n\n"
+        "⏱️ Automatic signal every 2 minutes."
     )
 
-    try:
+    while True:
 
-        data = await asyncio.to_thread(
-            calculate_signal,
-            pair
-        )
+        try:
 
-        message = format_signal(data)
+            # Check Telegram commands
+            check_commands()
 
-        await loading.edit_text(message)
+            print("\nGenerating automatic signals...")
 
-    except Exception as e:
+            signal_message = generate_signals()
 
-        await loading.edit_text(
-            "❌ Market data পাওয়া যাচ্ছে না।\n\n"
-            "কিছুক্ষণ পরে আবার চেষ্টা করুন।"
-        )
+            send_message(signal_message)
 
-        print(
-            f"Signal error for {pair}: {e}"
-        )
+            print("Signal sent.")
+            print("Waiting 2 minutes...")
 
+            # Wait 2 minutes
+            for _ in range(120):
 
-# =========================================================
-# CHECK ONE PAIR FOR /SIGNALS
-# =========================================================
+                check_commands()
 
-def check_pair(pair):
+                time.sleep(1)
 
-    try:
-        data = calculate_signal(pair)
+        except KeyboardInterrupt:
 
-        if (
-            data["signal"] == "🟢 UP"
-            or data["signal"] == "🔴 DOWN"
-        ):
-            return data
+            print("Bot stopped.")
 
-    except Exception as e:
-
-        print(
-            f"Error checking {pair}: {e}"
-        )
-
-    return None
-
-
-# =========================================================
-# /SIGNALS
-# =========================================================
-
-async def signals(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    loading = await update.message.reply_text(
-        "🔎 সব pair-এর market data পরীক্ষা করছি...\n"
-        "একটু অপেক্ষা করুন।"
-    )
-
-    try:
-
-        # Check pairs in parallel
-        with ThreadPoolExecutor(
-            max_workers=5
-        ) as executor:
-
-            results = list(
-                executor.map(
-                    check_pair,
-                    PAIRS.keys()
-                )
+            send_message(
+                "🛑 Happy Signal Bot stopped."
             )
 
-        valid_signals = [
-            x for x in results
-            if x is not None
-        ]
+            break
 
-        # -----------------------------------------
-        # NO SIGNAL
-        # -----------------------------------------
+        except Exception as e:
 
-        if not valid_signals:
+            print("MAIN ERROR:", e)
 
-            await loading.edit_text(
-                "🟡 এখন কোনো পরিষ্কার UP/DOWN signal পাওয়া যায়নি।\n\n"
-                "সব pair-এ WAIT/market-data সমস্যা আছে।\n\n"
-                "কিছুক্ষণ পরে আবার /signals দিন।"
-            )
-
-            return
-
-        # -----------------------------------------
-        # BUILD MESSAGE
-        # -----------------------------------------
-
-        message = (
-            "🚨 MH LIVE SIGNALS\n\n"
-            "⏱️ Timeframe: 5 মিনিট\n"
-            "📡 Source: Yahoo Finance\n\n"
-        )
-
-        for data in valid_signals:
-
-            message += (
-                f"💱 {data['pair']}\n"
-                f"💰 Price: {data['price']:.5f}\n"
-                f"📊 RSI: {data['rsi']:.2f}\n"
-                f"📈 EMA9: {data['ema9']:.5f}\n"
-                f"📉 EMA21: {data['ema21']:.5f}\n"
-                f"🎯 {data['signal']}\n\n"
-            )
-
-        message += (
-            "⚠️ এগুলো indicator-based signal।\n"
-            "Quotex-এর chart/OTC price-এর সাথে মিলিয়ে নিন।\n\n"
-            "❌ 100% নিশ্চিত signal নয়।"
-        )
-
-        await loading.edit_text(
-            message
-        )
-
-    except Exception as e:
-
-        await loading.edit_text(
-            "❌ Signal scan করতে সমস্যা হয়েছে।\n"
-            "কিছুক্ষণ পরে আবার /signals দিন।"
-        )
-
-        print(
-            f"All signals error: {e}"
-        )
+            time.sleep(30)
 
 
-# =========================================================
-# MAIN
-# =========================================================
-
-async def main():
-
-    # Render keep-alive server
-    threading.Thread(
-        target=web_server,
-        daemon=True
-    ).start()
-
-    print("🚀 MH Signal Bot starting...")
-
-    application = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
-
-    # Commands
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "pairs",
-            pairs
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "signal",
-            signal
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "signals",
-            signals
-        )
-    )
-
-    print("✅ Bot is ready!")
-
-    await application.initialize()
-
-    await application.start()
-
-    await application.updater.start_polling()
-
-    try:
-
-        while True:
-            await asyncio.sleep(3600)
-
-    except asyncio.CancelledError:
-        pass
-
-    finally:
-
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
-
-
-# =========================================================
-# RUN
-# =========================================================
+# ==================================================
+# START
+# ==================================================
 
 if __name__ == "__main__":
-
-    asyncio.run(main())
+    main()
