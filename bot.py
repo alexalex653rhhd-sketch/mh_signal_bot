@@ -6,8 +6,8 @@ from datetime import datetime
 # TELEGRAM SETTINGS
 # ==================================================
 
-BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
-CHAT_ID = "PASTE_YOUR_CHAT_ID_HERE"
+BOT_TOKEN = 8637932469:AAFP_9CT0trr87XeVliTYVjPquK83ujQ7Tc
+CHAT_ID =8760497927
 
 # ==================================================
 # SETTINGS
